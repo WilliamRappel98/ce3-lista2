@@ -1,0 +1,604 @@
+---
+title: ''
+subtitle: ""
+author: ""
+date: ""
+
+output:
+  pdf_document:
+  fig_crop: false
+highlight: tango
+number_sections: false
+fig_caption: true
+keep_tex: true
+includes:
+  in_header: Estilo.sty
+classoption: a4paper
+always_allow_html: true
+---
+
+\begin{center}
+{\Large
+  DEPARTAMENTO DE ESTATÍSTICA} \\
+\vspace{0.5cm}
+\begin{figure}[!t]
+\centering
+\includegraphics[width=9cm, keepaspectratio]{logo-UnB.eps}
+\end{figure}
+\vskip 1em
+{\large
+  16 de Janeiro de 2023}
+\vskip 3em
+{\LARGE
+  \textbf{Lista 2: Manipulação em Bancos de dados e em Spark com R}} \\
+\vskip 1em
+{\LARGE
+  \textbf{Resolução - William Rappel - 22/0006032}} \\
+\vskip 1em
+{\Large
+  Computação em Estatística para dados e cálculos massivos} \\
+\vskip 1em
+{\Large
+  Tópicos especiais em Estatística 1} \\
+\vskip 3em
+{\Large
+  Prof. Guilherme Rodrigues} \\
+\vskip 1em
+{\Large
+  César Augusto Fernandes Galvão (aluno colaborador)} \\
+\vskip 1em
+{\Large
+  Gabriel Jose dos Reis Carvalho (aluno colaborador)} \\
+\end{center}
+
+\vskip 5em
+
+\begin{enumerate}
+\item \textbf{As questões deverão ser respondidas em um único relatório \emph{PDF} ou \emph{html}, produzido usando as funcionalidades do \emph{Rmarkdown} ou outra ferramenta equivalente}.
+\item \textbf{O aluno poderá consultar materiais relevantes disponíveis na internet, tais como livros, \emph{blogs} e artigos}.
+\item \textbf{O trabalho é individual. Suspeitas de plágio e compartilhamento de soluções serão tratadas com rigor.}
+\item \textbf{Os códigos \emph{R} utilizados devem ser disponibilizados na integra, seja no corpo do texto ou como anexo.}
+\item \textbf{O aluno deverá enviar o trabalho até a data especificada na plataforma Microsoft Teams.}
+\item \textbf{O trabalho será avaliado considerando o nível de qualidade do relatório, o que inclui a precisão das respostas, a pertinência das soluções encontradas, a formatação adotada, dentre outros aspectos correlatos.}
+\item \textbf{Escreva seu código com esmero, evitando operações redundantes, visando eficiência computacional, otimizando o uso de memória, comentando os resultados e usando as melhores práticas em programação.}
+\end{enumerate}
+
+```{r setup, results=FALSE, message=FALSE, echo=FALSE, warnings=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warnings=FALSE)
+
+# carregando os pacotes necessarios
+if (!require('pacman')) install.packages('pacman')
+p_load(rmdformats, tidyverse, vroom, stringr, dplyr, dtplyr, dbplyr, data.table, rvest, microbenchmark, RSQLite, mongolite, DBI, sparklyr)
+```
+
+\newpage
+
+Por vezes, mesmo fazendo seleção de colunas e filtragem de linhas, o tamanho final da tabela extrapola o espaço disponível na memória RAM. Nesses casos, precisamos realizar as operações de manipulação *fora* do `R`, em um banco de dados ou em um sistema de armazenamento distribuído. Outas vezes, os dados já estão armazenados em algum servidor/cluster e queremos carregar para o `R` parte dele, possivelmente após algumas manipulações.
+
+Nessa lista repetiremos parte do que fizemos na Lista 1. Se desejar, use o gabarito da Lista 1 em substituição à sua própria solução dos respectivos itens.
+
+## Questão 1: Criando bancos de dados.
+
+**a)** Crie um banco de dados SQLite e adicione as tabelas consideradas no item 2a) da Lista 1.
+
+\textcolor{red}{\bf Solução}
+
+Primeiro, vamos criar um banco de dados na pasta atual em que estamos. Para isso, vamos utilizar a função `dbConnect` do pacote `DBI`.
+
+```{r sqlite-create-db}
+mydb <- dbConnect(RSQLite::SQLite(), 'my-db.sqlite')
+mydb
+```
+
+Agora, vamos adicionar as tabelas utilizadas no item 2a) da Lista 1. Primeiro, vamos adicionar a tabela provinda do pacote `geobr`. Para isso, utilizamos os comandos `dbWriteTable` e `dbAppendTable`.
+
+```{r sqlite-geo-part1}
+geo <- geobr::read_health_region(year=2013)
+geo$geom <- NULL
+geo$code_health_region <- as.integer(geo$code_health_region)
+```
+
+```{r sqlite-geo-part2, eval=FALSE}
+dbCreateTable(mydb, 'geo', geo)
+dbAppendTable(mydb, 'geo', geo)
+```
+
+```{r sqlite-geo-part3}
+dbListFields(mydb, 'geo')
+dbGetQuery(mydb, 'SELECT * FROM geo LIMIT 10')
+```
+
+Em seguida, adicionamos a tabela que relaciona o código do IBGE com o código de saúde, disponível no arquivo `Tabela_codigos.csv`.
+
+```{r sqlite-cod-part1}
+cod <- fread(file='Tabela_codigos.csv', encoding='UTF-8')
+names(cod) <- c('i', 'abbrev_state', 'municipio', 'codmun', 'code_health_region',
+                'nome_reg')
+```
+
+```{r sqlite-cod-part2, eval=FALSE}
+dbCreateTable(mydb, 'cod', cod)
+dbAppendTable(mydb, 'cod', cod)
+```
+
+```{r sqlite-cod-part3}
+dbListFields(mydb, 'cod')
+dbGetQuery(mydb, 'SELECT * FROM cod LIMIT 10')
+```
+
+Por último, vamos adicionar os dados públicos sobre a vacinação contra a Covid-19 referentes aos estados do Acre, Alagoas, Amazonas e Amapá, obtidos no item 1a) da Lista 1 e disponível na pasta `dados`.
+
+```{r sqlite-vac-part1}
+vac <- map(
+  list.files('dados', full.names=TRUE),
+  fread,
+  sep=';',
+  select=c('estabelecimento_uf', 'vacina_descricao_dose',
+           'estabelecimento_municipio_codigo'),
+  col.names=c('abbrev_state', 'dose', 'codmun'),
+  encoding='UTF-8'
+  ) %>%
+  rbindlist() %>%
+  as_tibble()
+if (!file.exists('vacinas.csv')) write.csv(vac, 'vacinas.csv')
+```
+
+```{r sqlite-vac-part2, eval=FALSE}
+dbCreateTable(mydb, 'vac', vac)
+dbAppendTable(mydb, 'vac', vac)
+```
+
+```{r sqlite-vac-part3}
+dbListFields(mydb, 'vac')
+dbGetQuery(mydb, 'SELECT * FROM vac LIMIT 10')
+```
+
+**b)** Refaça as operações descritas no item 2b) da Lista 1 executando códigos sql diretamente no banco de dados criado no item **a)**. Ao final, importe a tabela resultante para `R`. Não é necessário descrever novamente o que são as regiões de saúde.
+
+**Atenção**: **Pesquise e elabore os comandos sql sem usar a ferramenta de tradução de dplyr para sql**.
+
+\textcolor{red}{\bf Solução}
+
+Primeiro, realizamos o `left join` das 3 tabelas criadas no item 1a).
+
+```{r sqlite-left-join-part1, eval=FALSE}
+query = "
+CREATE TABLE full AS
+  SELECT *
+  FROM 
+  (
+    SELECT vc.*, g.name_health_region, g.code_state, g.name_state
+    FROM
+    (
+      SELECT v.*, c.municipio, c.code_health_region, c.nome_reg
+      FROM vac AS v
+      LEFT JOIN cod AS c
+      ON v.codmun = c.codmun
+    ) AS vc
+    LEFT JOIN geo AS g
+    ON vc.code_health_region = g.code_health_region
+  )
+"
+dbExecute(mydb, query)
+```
+
+```{r sqlite-left-join-part2}
+dbGetQuery(mydb, 'SELECT * FROM full LIMIT 10')
+```
+
+Depois, calculamos a quantidade de vacinados por região de saúde.
+
+```{r sqlite-n-part1, eval=FALSE}
+query = "
+CREATE TABLE aggregated AS
+  SELECT *
+  FROM 
+  (
+    SELECT code_health_region, COUNT(*) AS n
+    FROM full
+    GROUP BY code_health_region
+    ORDER BY 2
+  )
+"
+dbExecute(mydb, query)
+```
+
+```{r sqlite-n-part2}
+dbGetQuery(mydb, 'SELECT * FROM aggregated LIMIT 10')
+```
+
+Em seguida, calculamos a mediana da distribuição de vacinações e guardamos no objeto `mediana`.
+
+```{r sqlite-calc-median}
+query = "
+SELECT AVG(n) AS median
+FROM
+(
+  SELECT n
+  FROM aggregated
+  LIMIT 2 - (SELECT COUNT(*) FROM aggregated) % 2
+  OFFSET
+  (
+    SELECT (COUNT(*) - 1)/2
+    FROM aggregated
+  )
+)
+"
+(mediana <- dbGetQuery(mydb, query)[1,1])
+```
+
+Agora, criamos a faixa de vacinação por região de saúde (alta ou baixa, em relação à `mediana`).
+
+```{r sqlite-calc-faixa-part1, eval=FALSE}
+query = "
+CREATE TABLE aggregated_full AS
+  SELECT *
+  FROM
+  (
+    SELECT code_health_region, n, 
+           (CASE WHEN n <= aux THEN 'baixa' ELSE 'alta' END) AS faixa
+    FROM aggregated
+  )
+"
+dbExecute(mydb, query %>% str_replace('aux', as.character(mediana)))
+```
+
+```{r sqlite-calc-faixa-part2}
+dbGetQuery(mydb, 'SELECT * FROM aggregated_full LIMIT 10')
+```
+
+Por último, retornamos uma tabela com as 5 regiões de saúde com menos vacinados em cada faixa de vacinação.
+
+```{r sqlite-bottom5}
+query = "
+SELECT faixa, code_health_region, n
+FROM
+(
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY faixa ORDER BY faixa, n) AS i
+  FROM aggregated_full
+) AS a
+WHERE i <= 5
+ORDER BY 1 DESC, 3
+"
+(final <- dbGetQuery(mydb, query))
+```
+
+**c)** Refaça os itens a) e b), agora com um banco de dados MongoDB.
+
+\textcolor{red}{\bf Solução}
+
+Primeiro, vamos criar uma coleção chamada `geo`, contendo os dados da tabela provinda do pacote `geobr`.
+
+```{r mongodb-geo-part1}
+cx_geo <- mongo(collection='geo', db='ce3-lista2', url='mongodb://localhost:27017')
+```
+
+```{r mongodb-geo-part2, eval=FALSE}
+cx_geo$insert(geo)
+```
+
+```{r mongodb-geo-part3}
+cx_geo$find(limit=10)
+```
+
+Em seguida, vamos criar uma coleção chamada `cod`, contendo a tabela que relaciona o código do IBGE com o código de saúde.
+
+```{r mongodb-cod-part1}
+cx_cod <- mongo(collection='cod', db='ce3-lista2', url='mongodb://localhost:27017')
+```
+
+```{r mongodb-cod-part2, eval=FALSE}
+cx_cod$insert(cod)
+```
+
+```{r mongodb-cod-part3}
+cx_cod$find(limit=10)
+```
+
+Em seguida, vamos criar uma coleção chamada `vac`, contendo os dados públicos sobre a vacinação contra a Covid-19 referentes aos estados do Acre, Alagoas, Amazonas e Amapá.
+
+```{r mongodb-vac-part1}
+cx_vac <- mongo(collection='vac', db='ce3-lista2', url='mongodb://localhost:27017')
+```
+
+```{r mongodb-vac-part2, eval=FALSE}
+cx_vac$insert(vac)
+```
+
+```{r mongodb-vac-part3}
+cx_vac$find(limit=10)
+```
+
+Agora, realizamos o `left join` das 3 coleções criadas.
+
+```{r mongodb-left-join-part1, eval=FALSE}
+cx_vac$aggregate('[
+  {
+    "$lookup":
+      {
+        "from": "cod",
+        "localField": "codmun",
+        "foreignField": "codmun",
+        "as": "cod"
+      }
+  },
+  {"$out": "vac_cod"}
+]')
+```
+
+```{r mongodb-left-join-part2}
+cx_vac_cod <- mongo(collection='vac_cod', db='ce3-lista2',
+                    url='mongodb://localhost:27017')
+```
+
+```{r mongodb-left-join-part3, eval=FALSE}
+cx_vac_cod$aggregate('[
+  {
+    "$lookup":
+      {
+        "from": "geo",
+        "localField": "cod.code_health_region",
+        "foreignField": "code_health_region",
+        "as": "geo"
+      }
+  },
+  {"$out": "vac_cod_geo"}
+]')
+```
+
+```{r mongodb-left-join-part4}
+cx_vac_cod_geo <- mongo(collection='vac_cod_geo', db='ce3-lista2',
+                        url='mongodb://localhost:27017')
+cx_vac_cod_geo$find(limit=10)
+```
+
+Por último, realizamos as demais operações.
+
+```{r mongodb-calc-final}
+# numero de vacinados
+stats <- cx_vac_cod_geo$aggregate('[{
+  "$group": {"_id": "$cod.code_health_region",
+  "count": {"$sum": 1}}
+}]',
+  options='{"allowDiskUse": true}')
+cx_stats <- mongo(collection='stats', db='ce3-lista2', url='mongodb://localhost:27017')
+stats$`_id` <- as.integer(stats$`_id`)
+cx_stats$insert(stats)
+
+# mediana
+total <- cx_stats$count('{}')
+if (total %% 2 == 1) {
+  id <- (total + 1) / 2
+  mediana_m <- cx_stats$find(sort='{"count": 1}', limit=id)[id,]
+} else {
+  id <- total / 2
+  mediana_m <- mean(cx_stats$find(sort='{"count": 1}', limit=id)[id,],
+                    cx_stats$find(sort='{"count": -1}', limit=id)[id,])
+}
+mediana_m == mediana
+
+# faixa de vacinados
+cx_stats$update(
+  str_replace('{"count" : {"$lte" : aux}}', 'aux', as.character(mediana_m)),
+  '{"$set": {"faixa": "baixa"}}', multiple=TRUE
+)
+cx_stats$update(
+  str_replace('{"count" : {"$gt" : aux}}', 'aux', as.character(mediana_m)),
+  '{"$set": {"faixa": "alta"}}', multiple=TRUE
+)
+
+# tabela final
+t1 <- cx_stats$find('{"faixa":"baixa"}', sort='{"count": 1}', limit=5,
+                    fields='{"_id":true, "faixa":true, "count":true}')
+t2 <- cx_stats$find('{"faixa":"alta"}', sort='{"count": 1}', limit=5,
+                    fields='{"_id":true, "faixa":true, "count":true}')
+final <- rbind(t1, t2)
+names(final)[1] <- 'code_health_region'
+final
+```
+
+**d)** Refaça os itens c), agora usando o Apache Spark.
+
+\textcolor{red}{\bf Solução}
+
+Primeiro, vamos criar a conexão com o cluster Spark.
+
+```{r spark-connect}
+conf <- spark_config()
+conf$`sparklyr.cores.local` <- 4
+conf$`sparklyr.shell.driver-memory` <- '8G'
+conf$spark.memory.fraction <- 0.9
+sc <- spark_connect(master='local', config=conf)
+```
+
+Em seguida, vamos enviar os dados do `geobr`.
+
+```{r spark-geo}
+spark_geo <- copy_to(sc, geo, 'geo', overwrite=TRUE)
+```
+
+Agora, vamos enviar os dados do IBGE.
+
+```{r spark-cod}
+spark_cod <- copy_to(sc, cod, 'cod', overwrite=TRUE)
+```
+
+Depois, realizamos o mesmo com os dados de vacinação.
+
+```{r spark-vac}
+spark_read_csv(sc, name='vac', path='vacinas.csv', overwrite=TRUE)
+spark_vac <- tbl(sc, 'vac')
+```
+
+Agora, realizamos o `left join` das 3 tabelas criadas, computamos os cálculos e coletamos o resultado.
+
+```{r spark-left-join-calc}
+spark_final <- spark_vac %>%
+  left_join(spark_cod, by='codmun') %>%
+  left_join(spark_geo, by='code_health_region') %>%
+  group_by(code_health_region) %>%
+  summarise(N = n()) %>%
+  ungroup() %>%
+  mutate(nivel_vacincao = if_else(N > median(N), 'alta', 'baixa')) %>%
+  group_by(nivel_vacincao) %>%
+  slice_min(order_by=N, n=5) %>%
+  arrange(N) %>%
+  collect()
+spark_final
+```
+
+**e)** Compare o tempo de processamento das 3 abordagens (SQLite, MongoDB e Spark), desde o envio do comando sql até o recebimento dos resultados no `R`. Comente os resultados incluindo na análise os resultados obtidos no item 2d) da Lista 1.
+
+**Cuidado**: A performance pode ser completamente diferente em outros cenários (com outras operações, diferentes tamanhos de tabelas, entre outros aspectos).
+
+\textcolor{red}{\bf Solução}
+
+Primeiro, vamos construir uma função que faz toda a manipulação no SQLite.
+
+```{r func-sqlite}
+func_sqlite <- function() {
+  # left join
+  query = "
+  CREATE TABLE full2 AS SELECT * FROM 
+  (SELECT vc.*, g.name_health_region, g.code_state, g.name_state FROM
+    (SELECT v.*, c.municipio, c.code_health_region, c.nome_reg FROM vac AS v
+     LEFT JOIN cod AS c ON v.codmun = c.codmun) AS vc
+    LEFT JOIN geo AS g ON vc.code_health_region = g.code_health_region)"
+  dbExecute(mydb, query)
+  
+  # numero de vacinados
+  query = "
+  CREATE TABLE aggregated2 AS SELECT * FROM 
+  (SELECT code_health_region, COUNT(*) AS n 
+  FROM full2 GROUP BY code_health_region ORDER BY 2)"
+  dbExecute(mydb, query)
+  
+  # mediana
+  query = "
+  SELECT AVG(n) AS median FROM
+  (SELECT n FROM aggregated2 LIMIT 2 - (SELECT COUNT(*) FROM aggregated2) % 2
+   OFFSET (SELECT (COUNT(*) - 1)/2 FROM aggregated2))"
+  mediana <- dbGetQuery(mydb, query)[1,1]
+  
+  # faixa de vacinacao
+  query = "
+  CREATE TABLE aggregated_full2 AS SELECT * FROM
+  (SELECT code_health_region, n, 
+  (CASE WHEN n <= aux THEN 'baixa' ELSE 'alta' END) AS faixa FROM aggregated2)"
+  dbExecute(mydb, query %>% str_replace('aux', as.character(mediana)))
+  
+  # bottom5
+  query = "
+  SELECT faixa, code_health_region, n FROM
+  (SELECT *, ROW_NUMBER() OVER 
+  (PARTITION BY faixa ORDER BY faixa, n) AS i FROM aggregated_full2) AS a
+  WHERE i <= 5 ORDER BY 1 DESC, 3"
+  final <- dbGetQuery(mydb, query)
+}
+```
+
+Em seguida, vamos construir uma função que faz toda a manipulação no MongoDB.
+
+```{r func-mongodb}
+func_mongodb <- function() {
+  # left join
+  cx_vac$aggregate(
+  '[{"$lookup":{"from":"cod",
+  "localField":"codmun",
+  "foreignField":"codmun","as":"cod"}},
+  {"$out":"vac_cod2"}]'
+  )
+  cx_vac_cod2 <- mongo(collection='vac_cod2', db='ce3-lista2',
+                       url='mongodb://localhost:27017')
+  cx_vac_cod2$aggregate(
+    '[{"$lookup":{"from":"geo",
+    "localField":"cod.code_health_region",
+    "foreignField":"code_health_region","as":"geo"}},
+    {"$out":"vac_cod_geo2"}]'
+  )
+  cx_vac_cod_geo2 <- mongo(collection='vac_cod_geo2', db='ce3-lista2',
+                           url='mongodb://localhost:27017')
+  
+  # numero de vacinados
+  stats2 <- cx_vac_cod_geo2$aggregate(
+  '[{"$group":{"_id":"$cod.code_health_region",
+  "count":{"$sum":1}}}]',
+  options='{"allowDiskUse":true}'
+  )
+  cx_stats2 <- mongo(collection='stats2', db='ce3-lista2',
+                     url='mongodb://localhost:27017')
+  stats2$`_id` <- as.integer(stats2$`_id`)
+  cx_stats2$insert(stats2)
+  
+  # mediana
+  total <- cx_stats2$count('{}')
+  if (total %% 2 == 1) {
+    id <- (total + 1) / 2
+    mediana_m <- cx_stats2$find(sort='{"count":1}', limit=id)[id,]
+  } else {
+    id <- total / 2
+    mediana_m <- mean(cx_stats2$find(sort='{"count":1}', limit=id)[id,],
+                      cx_stats2$find(sort='{"count":-1}', limit=id)[id,])
+  }
+  
+  # faixa de vacinacao
+  cx_stats2$update(
+    str_replace('{"count":{"$lte":aux}}', 'aux', as.character(mediana_m)), 
+    '{"$set":{"faixa":"baixa"}}', multiple=TRUE)
+  cx_stats2$update(
+    str_replace('{"count":{"$gt":aux}}', 'aux', as.character(mediana_m)),
+    '{"$set":{"faixa":"alta"}}', multiple=TRUE)
+  
+  # bottom5
+  t1 <- cx_stats2$find('{"faixa":"baixa"}', sort='{"count": 1}', limit=5,
+                       fields='{"_id":true, "faixa":true, "count":true}')
+  t2 <- cx_stats2$find('{"faixa":"alta"}', sort='{"count": 1}', limit=5,
+                       fields='{"_id":true, "faixa":true, "count":true}')
+  final <- rbind(t1, t2)
+  names(final)[1] <- 'code_health_region'
+}
+```
+
+Em seguida, vamos construir uma função que faz toda a manipulação no Spark.
+
+```{r func-spark}
+func_spark <- function() {
+  final <- spark_vac %>%
+    left_join(spark_cod, by='codmun') %>%
+    left_join(spark_geo, by='code_health_region') %>%
+    group_by(code_health_region) %>%
+    summarise(N = n()) %>%
+    ungroup() %>%
+    mutate(nivel_vacincao = if_else(N > median(N), 'alta', 'baixa')) %>%
+    group_by(nivel_vacincao) %>%
+    slice_min(order_by=N, n=5) %>%
+    arrange(N) %>%
+    collect()
+}
+```
+
+Para realizar a comparação, vamos utilizar o pacote `microbenchmark`.
+
+```{r microbecnhmark}
+microbenchmark(
+  sqlite = func_sqlite(),
+  mongodb = func_mongodb(),
+  spark = func_spark(),
+  times = 1
+)
+```
+
+Dentre as três abordagens, a de menor tempo de processamento foi o Spark. Em segundo lugar, ficou o SQLite. Por último, o mais lento foi o MongoDB, com mais que 100x o tempo de processamento do Spark. Ao analisar uma análise de *profiling*, a etapa mais lenta no MongoDB e que piora muito o seu desempenho global é o *left-join*, que não é uma tarefa nativa desse tipo de banco de dados.
+
+Ao comparar com os resultados obtidos no item 2d) da Lista 1, o Spark teve tempo de processamento muito semelhante ao `data.table`, `dtplyr` e `dplyr`, sendo ligeiramente mais rápido que o primeiro e um pouco mais lento que os demais.
+
+```{r disconnect, include=FALSE}
+# disconnect sqlite, mongodb, spark
+dbDisconnect(mydb)
+cx_geo$disconnect(); cx_cod$disconnect(); cx_vac$disconnect(); cx_vac_cod$disconnect(); cx_vac_cod_geo$disconnect(); cx_stats$disconnect()
+spark_disconnect(sc)
+
+# clean r objects
+gc()
+rm(list=ls())
+```
