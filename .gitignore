@@ -3,3 +3,5 @@
 .RData
 .Ruserdata
 /dados
+metastore_db/
+*.log
