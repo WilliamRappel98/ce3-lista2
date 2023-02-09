@@ -63,8 +63,8 @@ always_allow_html: true
 \item \textbf{Escreva seu código com esmero, evitando operações redundantes, visando eficiência computacional, otimizando o uso de memória, comentando os resultados e usando as melhores práticas em programação.}
 \end{enumerate}
 
-```{r setup, results=FALSE, message=FALSE, echo=FALSE, warnings=FALSE}
-knitr::opts_chunk$set(echo=TRUE, warnings=FALSE)
+```{r setup, results=FALSE, message=FALSE, echo=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE)
 
 # carregando os pacotes necessarios
 if (!require('pacman')) install.packages('pacman')
